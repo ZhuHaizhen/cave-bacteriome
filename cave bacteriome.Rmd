@@ -1,0 +1,646 @@
+---
+title: "cave bacteriome"
+author: "zhuhz"
+date: "2018/10/22"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Map
+
+```{r}
+library(tidyverse)
+library(maptools)
+library(plyr)
+
+china1 <- readShapePoly("CHN_adm/CHN_adm1.shp", proj4string=CRS("+proj=longlat +ellps=clrk66"))
+
+num.prov <- length(china1$NAME_1)
+
+x1 <- china1@data
+xs1 <- data.frame(x1,id = seq(0:31)-1)
+
+china_map1 <- fortify(china1)
+
+china_mapdata1 <- join(china_map1, xs1, type = "full")
+
+subset <- c("Guizhou","Chongqing","Sichuan","Yunnan","Guangxi")
+
+china_mapdata1 <- china_mapdata1 %>%
+  mutate(subset = ifelse(NAME_1%in%subset,"yes","no"))
+
+samp_area.p <- china_mapdata1 %>%
+  ggplot(aes(x = long,y = lat,group = group,fill = subset)) + theme_void() + geom_polygon() + geom_path(color = "gray40") + scale_fill_manual(values = c("white","gray"),guide = FALSE)
+samp_area.p
+ggsave(samp_area.p,filename = "samp_area.pdf",height = 4,width = 5)
+
+samp_prov <- china_mapdata1 %>%
+  filter(NAME_1%in%subset)
+
+samp_prov.all <- samp_prov %>%
+  ggplot(aes(x = long,y = lat,group = group)) + theme_bw() + geom_polygon(fill = "white") + geom_path(color = "gray40") + annotate("point",x = c(108.0006,108.006,110.5105,108.9311,105.1393,106.8783,103.3825,102.8481,107.13639,107.13661),y = c(29.58503,29.59083,24.94182,23.41,28.19017,30.41,25.13444,24.46986,28.12629,28.12599),color = "red",size = 2) + labs(x = "Longitude",y = "Latitude") + xlim(97,116)
+samp_prov.all
+ggsave(samp_prov.all,filename = "samp_prov_all.pdf",height = 4,width = 6)
+```
+
+# 16S rRNA gene amplicon analysis
+
+## remove mitochondria and chloroplast
+
+```{r}
+counts.in <- read.table("cave.in_otu_table_filtered_sorted.txt", header = T, row.names = 1, sep = "\t" )
+
+counts_clean.in <- counts.in %>%
+  mutate(otuID = row.names(.)) %>%
+  mutate(keep = ifelse(str_detect(counts.in$taxonomy,"mitochondria")|str_detect(counts.in$taxonomy,"Chloroplast"), "no", "yes")) %>%
+  filter(keep == "yes") %>%
+  column_to_rownames("otuID") %>%
+  select(-keep)
+
+summarise(counts.in,n()) # 11538
+
+summarise(counts_clean.in,n()) # 11444
+
+counts_clean.in %>%
+  write.table("cave.in_otu_table_filtered_sorted_clean.txt", sep = "\t")
+```
+
+## profiling
+
+```{r}
+library(reshape2)
+
+map.in <- read.table("mapping.in.txt",header = T, row.names = 1, sep = "\t")
+
+phy <- read.table("in.taxa_summary/cave.in_otu_table_filtered_even_sorted_L2.txt",header = T,row.names = 1,sep = "\t") %>%
+  rownames_to_column("taxa")
+
+phy.no_tax <- phy %>%
+  select(-taxa)
+
+#use the median abundance of the specified phylum in the specified cave
+#top 5 phyla(had at least 1% average abundance across the entire dataset)
+abun.phy <- melt(cbind(map.in,t(phy.no_tax)),id.vars = c("SampleID","Cave","Type","Distance","Altitude","Latitude","Longitude","Temperature","Humidity_Air")) %>%
+  group_by(Cave,variable) %>%
+  mutate(med = median(value)*100) %>%
+  group_by(variable) %>%
+  mutate(core = ifelse(mean(med) >= 1,"yes","no")) %>%
+  select("Cave","variable","med","core") %>%
+  distinct(Cave,.keep_all = T) %>%
+  ungroup() %>%
+  spread(Cave,med) %>%
+  cbind(taxa = phy$taxa) %>%
+  filter(core == "yes") %>%
+  separate(taxa,c("kindom","phylum"),sep = ";") %>%
+  separate(kindom,c("k","kindom"),sep = "__") %>%
+  separate(phylum,c("p","phylum"),sep = "__") %>%
+  select(-kindom,-k,-p,-core,-variable) %>%
+  gather(cave,med,-phylum)
+
+abun.phy$phylum <- factor(abun.phy$phylum,levels = c("Actinobacteria","Proteobacteria","Firmicutes","Crenarchaeota","Gemmatimonadetes"))
+
+phy.p <- abun.phy %>%
+  ggplot(aes(cave,phylum)) + theme_classic() + geom_tile(aes(fill = med),color = "white") + geom_text(aes(label = round(med,2)),color = ifelse(abun.phy$med >= 1,"black","white")) + theme(axis.text.x = element_text(angle = 45,hjust = 1,vjust = 1),axis.title = element_blank()) + scale_fill_gradientn(colors = c("royalblue4","yellow","palevioletred1","indianred1"),values = c(0,0.02,0.5,1)) + theme(legend.position = "none")
+
+ggsave(phy.p,filename = "heatmap_phy.pdf",height = 4,width = 6)
+
+fam <- read.table("in.taxa_summary/cave.in_otu_table_filtered_even_sorted_L5.txt",header = T,row.names = 1,sep = "\t") %>%
+  rownames_to_column("taxa")
+
+fam.no_tax <- fam %>%
+  select(-taxa)
+
+#use the median abundance of the specified family in the specified cave
+#taxa that had at least 1% average abundance across the entire dataset
+abun.fam <- melt(cbind(map.in,t(fam.no_tax)),id.var = c("SampleID","Cave","Type","Distance","Altitude","Latitude","Longitude","Temperature","Humidity_Air")) %>%
+  group_by(Cave,variable) %>%
+  mutate(med = median(value)*100) %>%
+  group_by(variable) %>%
+  mutate(core = ifelse(mean(med) >= 1,"yes","no")) %>%
+  select("Cave","variable","med","core") %>%
+  distinct(Cave,.keep_all = T) %>%
+  ungroup() %>%
+  spread(Cave,med) %>%
+  cbind(taxa = fam$taxa) %>%
+  filter(core == "yes") %>%
+  separate(taxa,c("kindom","phylum","class","order","family"),sep = ";") %>%
+  separate(kindom,c("k","kindom"),sep = "__") %>%
+  separate(phylum,c("p","phylum"),sep = "__") %>%
+  separate(class,c("c","class"),sep = "__") %>%
+  separate(order,c("o","order"),sep = "__") %>%
+  separate(family,c("f","family"),sep = "__") %>%
+  select(-variable,-k,-p,-c,-o,-f,-core,-kindom) %>%
+  gather(cave,med,-family,-order,-class,-phylum) %>%
+  mutate(family = ifelse(family == "","Unclassified",`family`)) %>%
+  unite(taxa,phylum,class,order,family,sep = "/",remove = T)
+  
+fam.p <- abun.fam %>%
+  ggplot(aes(cave,taxa)) + theme_classic() + geom_tile(aes(fill = med),color = "white") + geom_text(aes(label = round(med,2)),color = ifelse(abun.fam$med >= 2,"black","white")) + theme(axis.text.x = element_text(angle = 45,hjust = 1,vjust = 1),axis.title = element_blank()) + scale_fill_gradientn(colors = c("royalblue4","yellow","palevioletred1","indianred1"),values = c(0,0.1,0.3,1)) + theme(legend.position = "none")
+
+ggsave(fam.p,filename = "heatmap_fam.pdf",width = 9,height = 5)
+```
+
+## alpha diversity
+
+```{r}
+alpha.in <- read.table("in.alpha.txt", header=T, sep="\t",row.names = 1)
+
+alpha.in <- alpha.in %>%
+  mutate(SampleID = row.names(.)) %>%
+  arrange(SampleID) %>%
+  inner_join(map.in,by = "SampleID")
+
+shapiro.test(alpha.in$shannon) #p-value = 0.08756
+bartlett.test(shannon ~ Cave,alpha.in) #p-value = 0.1088
+cave.aov<- aov(shannon ~ Cave,alpha.in)
+summary(cave.aov) #F(7,119)=1.352,Pr(>F)=0.232
+
+bartlett.test(shannon ~ Type,alpha.in) #p-value = 0.02133
+kruskal.test(shannon ~ Type,alpha.in) #p-value = 0.0006414
+
+library(pgirmess)
+kruskalmc(shannon ~ Type,alpha.in,probs = 0.05) #Air-Soil TRUE
+
+theme_set(theme_bw())
+alpha.in$Type <- factor(alpha.in$Type,levels = c("Air","Rock","Water","Soil"))
+
+p1 <- ggplot(alpha.in, aes(x=Type, y=shannon, color=Type)) + stat_boxplot(geom = "errorbar",width=0.2,aes(color=Type)) + geom_boxplot(alpha=1, outlier.size=0, size=0.7, width=0.5, fill="transparent") + labs(x="Sample type", y="Shannon indices") + theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1),axis.title.x = element_blank()) + scale_color_brewer(palette = "Set2") + theme(legend.position = "none")
+
+p2<- ggplot(alpha.in, aes(x=Cave, y=shannon, color=Cave)) + stat_boxplot(geom = "errorbar",width=0.2,aes(color=Cave)) + geom_boxplot(alpha=1, outlier.size=0, size=0.7, width=0.5, fill="transparent") + labs(x="Cave", y="Shannon indices") + theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1),axis.title.x = element_blank()) + scale_color_brewer(palette = "Paired") + theme(legend.position = "none")
+
+ggsave(p1,filename = "shannon_type.pdf",height = 4,width = 4)
+ggsave(p2,filename = "shannon_cave.pdf",height = 4,width = 8)
+```
+
+## beta diversity
+
+```{r}
+counts.in_css <- read.table("cave.in_otu_table_css.txt", header = T, row.names = 1, sep = "\t")
+
+counts.in_css <- counts.in_css %>%
+  select(-taxonomy)
+
+cave.in_css <- melt(cbind(map.in,t(counts.in_css)),id.vars = c("SampleID","Cave","Type","Distance","Altitude","Latitude","Longitude","Temperature","Humidity_Air")) %>%
+  rename(OTU = variable) %>%
+  rename(Counts = value)
+
+wide_cave.in_css <- cave.in_css %>%
+  spread(OTU,Counts,fill = 0)
+
+library(vegan)
+
+adonis(wide_cave.in_css[,10:ncol(wide_cave.in_css)] ~ wide_cave.in_css$Type)
+#                       Df  SumsOfSqs MeanSqs F.Model   R2    Pr(>F)    
+#wide_cave.in_css$Type   3  5.236     1.74532 4.9577  0.1071  0.001 ***
+#Residuals             124  43.653    0.35204         0.8929           
+#Total                 127  48.889                    1.0000 
+
+library(pairwiseAdonis)
+
+type.2perm <- pairwise.adonis(wide_cave.in_css[,5:ncol(wide_cave.in_css)],wide_cave.in_css$Type)
+type.2perm
+#      pairs      F.Model         R2      p.value  p.adjusted
+# Air vs Rock    8.083950    0.10352896   0.001      0.006   
+# Air vs Soil    10.152422   0.12510313   0.001      0.006   
+# Air vs Water   5.161940    0.08875116   0.001      0.006   
+# Rock vs Soil   2.337844    0.03187773   0.002      0.012   
+# Rock vs Water  1.837273    0.03350409   0.001      0.006   
+# Soil vs Water  1.360881    0.02458199   0.050      0.300   
+
+pcoa <- function(x,m) {
+  pco <- cmdscale(x, k = 3, eig = T)
+  pco.axes <- as.data.frame(pco$points)
+  colnames(pco.axes) <- c("x", "y", "z")
+  pco.axes <- cbind(pco.axes,m[match(row.names(pco.axes),m$SampleID),])
+  pco.eig <- eigenvals(pco) / sum(eigenvals(pco))
+  pco.res <- list(axes = pco.axes, eig = pco.eig)
+  return(pco.res)
+}
+
+weighted <- read.table("in.beta/weighted_unifrac_cave.in_otu_table_css.txt", sep="\t", header=T, check.names=F)
+
+pcoa.weighted <- pcoa(weighted,map.in)
+head(pcoa.weighted$eig)
+#0.38130601 0.15856969 0.08265793 0.05239138 0.03850398 0.03476222
+
+pcoa.weighted$axes$Type <- factor(pcoa.weighted$axes$Type,levels = c("Air","Rock","Water","Soil"))
+
+#find_hull <- function(df) df[chull(df$x, df$y), ]
+
+#hulls <- ddply(pcoa.weighted$axes,"Type",find_hull)
+
+type.pcoa <- pcoa.weighted$axes %>%
+  ggplot(aes(x,y,color = Type)) + geom_point(size = 3) + theme_bw() +  theme(panel.grid = element_blank(),legend.position = "bottom",legend.title = element_blank()) + scale_colour_brewer(palette = "Set2") + stat_ellipse(level = 0.95,linetype = 5) + labs(x = "PCo1 (38.13%)",y = "PCo2 (15.86%)")
+#+ geom_polygon(data = hulls,linetype = 2,fill= "transparent",show.legend = F)
+
+ggsave(type.pcoa,filename = "pcoa.pdf",width = 5,height = 4)
+```
+
+## differential taxa among different types of sample
+
+```{r}
+library(edgeR)
+
+counts_clean.in_no_tax <- counts_clean.in %>%
+  select(-taxonomy)
+
+map.air <- map.in %>%
+  mutate(air = ifelse(Type == "Air","yes","no")) %>%
+  group_by(air) %>%
+  mutate(n = n()) %>%
+  ungroup()
+
+map.air$air <- factor(map.air$air,levels = c("yes","no"))
+
+d <- DGEList(counts = counts_clean.in_no_tax,group = map.air$air)
+dn <- calcNormFactors(d)
+mat <- model.matrix( ~ 0 + dn$samples$group)
+colnames(mat) <- levels(map.air$air)
+
+de <- estimateGLMCommonDisp(dn,mat)
+de2 <- estimateGLMTagwiseDisp(de,mat)
+fit <- glmFit(de2,mat)
+
+contrast <- function(fit,mat,formula){
+  vs <- makeContrasts(contrasts = formula,levels = mat)
+  lrt <- glmLRT(fit,contrast = vs)
+  de_lrt <- decideTestsDGE(lrt,adjust.method = "fdr",p.value = 0.05)
+  x <- lrt$table
+  x$sig <- de_lrt[,1]
+  return(x)
+}
+
+a <- contrast(fit,mat,"yes-no") %>%
+  rownames_to_column("OTU") %>%
+  cbind(taxa = counts_clean.in$taxonomy) %>%
+  mutate(level = as.factor(ifelse(sig==1, "enriched",ifelse(sig==-1, "depleted","not significant")))) %>%
+  group_by(level) %>%
+  mutate(n = n()) %>%
+  mutate(neglogp = -log(PValue)) %>%
+  separate(taxa,c("kindom","phylum","class","order","family","genera"),sep = ";") %>%
+  separate(phylum,c("p","phylum"),sep = "__") %>%
+  separate(class,c("c","class"),sep = "__") %>%
+  separate(order,c("o","order"),sep = "__") %>%
+  separate(family,c("f","family"),sep = "__") %>%
+  separate(genera,c("g","genera"),sep = "__") %>%
+  select(-kindom,-p,-c,-o,-f,-g)
+
+top_phylum <- c("Acidobacteria","Tenericutes","Actinobacteria","Bacteroidetes","Firmicutes","Proteobacteria","Cyanobacteria")
+a[!(a$phylum%in%top_phylum),]$phylum = "Others"
+a$phylum <- factor(a$phylum,levels = c(top_phylum,"Others"))
+a <- arrange(a,phylum)
+
+a$OTU <- factor(a$OTU,levels = a$OTU)
+a$level <- factor(a$level,levels = c("enriched","depleted","not significant"))
+FDR <- min(a$neglogp[a$level == "depleted"])
+a[a$neglogp > 40,]$neglogp = 40
+
+a.p <- a %>%
+  ggplot(aes(OTU,neglogp,color = phylum,size = logCPM,shape = level)) + geom_point(alpha = 0.7) + theme_bw() +  theme(panel.grid = element_blank()) + geom_hline(yintercept = FDR,linetype = 5,color = "grey33") + scale_shape_manual(values = c(17,25,20)) + scale_size(breaks = c(3,6,9,12)) + labs(x = "OTU",y = "-loge(p-value)") + theme(axis.ticks.x = element_blank(),axis.text.x = element_blank(),legend.position = "bottom",legend.text = element_text(size = 8),legend.title = element_text(size = 8,face = "bold"))
+
+ggsave("air_manhattan.pdf",a.p,width = 10,height = 5)
+```
+
+# cultured bacteriome
+
+## statistics
+
+```{r}
+tab1 <- read.table("culturable0821.txt",header = T,sep = "\t")
+tab1[is.na(tab1)] <- 0
+
+tab2 <- tab1 %>%
+  gather("sampleID","counts",-taxa) %>%
+  group_by(taxa,sampleID) %>%
+  mutate(n = n()) %>%
+  mutate(counts = sum(counts)) %>%
+  group_by(taxa) %>%
+  distinct(sampleID,.keep_all = TRUE) %>%
+  select(-n) %>%
+  spread(sampleID,counts)
+  
+tab2 %>%
+  write.table("culturable_wide.txt", sep = "\t")
+
+tab3 <- read.table("culturable_wide_1.txt",header = T,row.names = 1,sep = "\t")
+
+all <- tab3 %>%
+  gather("SampleID","counts",-taxa) %>%
+  mutate(Cave = ifelse(startsWith(SampleID,"K1"),"K1","K2")) %>%
+  mutate(Type = ifelse(startsWith(SampleID,"K1R")|startsWith(SampleID,"K2R"),"Rock",ifelse(startsWith(SampleID,"K1S")|startsWith(SampleID,"K2S"),"Soil","Water"))) %>%
+  separate(taxa,c("kindom","phylum","class","order","family","genus"),sep = "; ",remove = FALSE) %>%
+  separate(genus,c("genus","species"),sep = " ") %>%
+  select(-kindom)
+
+cave1 <- all %>%
+  filter(Cave == "K1") %>%
+  select(taxa,SampleID,counts,Type) %>%
+  group_by(SampleID,taxa) %>%
+  mutate(keep = ifelse(sum(counts) == 0,"no","yes")) %>%
+  filter(keep == "yes") %>%
+  select(-keep) %>%
+  ungroup() %>%
+  mutate(n = sum(counts)) %>%
+  group_by(Type) %>%
+  mutate(n.t = sum(counts))
+
+cave2 <- all %>%
+  filter(Cave == "K2") %>%
+  select(taxa,SampleID,counts,Type) %>%
+  group_by(SampleID,taxa) %>%
+  mutate(keep = ifelse(sum(counts) == 0,"no","yes")) %>%
+  filter(keep == "yes") %>%
+  select(-keep) %>%
+  ungroup() %>%
+  mutate(n = sum(counts)) %>%
+  group_by(Type) %>%
+  mutate(n.t = sum(counts))
+
+phylum <- all %>%
+  select(phylum,SampleID,counts,Cave,Type) %>%
+  group_by(phylum,Cave) %>%
+  mutate(n.c = sum(counts)) %>%
+  group_by(Cave) %>%
+  mutate(RA.c = n.c/sum(counts)) %>%
+  ungroup() %>%
+  group_by(phylum,Type) %>%
+  mutate(n.t = sum(counts)) %>%
+  group_by(Type) %>%
+  mutate(RA.t = n.t/sum(counts)) %>%
+  group_by(phylum,Cave,Type) %>%
+  mutate(n.ct = sum(counts)) %>%
+  group_by(Cave,Type) %>%
+  mutate(RA.ct = n.ct/sum(counts)) %>%
+  group_by(phylum) %>%
+  mutate(n = sum(counts)) %>%
+  ungroup() %>%
+  mutate(RA = n/sum(counts)) %>%
+  select(-SampleID,-counts) %>%
+  group_by(Cave,Type) %>%
+  distinct(phylum,.keep_all = TRUE)
+
+genus <- all %>%
+  select(phylum,class,genus,counts,Cave) %>%
+  group_by(genus) %>%
+  mutate(counts.g = sum(counts)) %>%
+  select(-counts) %>%
+  distinct(genus,.keep_all = TRUE)
+
+cave1.g <- all %>%
+  select(phylum,class,genus,counts,Cave) %>%
+  filter(Cave == "Cave 1") %>%
+  group_by(genus) %>%
+  mutate(counts.g = sum(counts)) %>%
+  select(-counts) %>%
+  distinct(genus,.keep_all = TRUE) %>%
+  mutate(keep = ifelse(counts.g == 0,"no","yes")) %>%
+  filter(keep == "yes") %>%
+  select(-keep)
+
+cave2.g <- all %>%
+  select(phylum,class,genus,counts,Cave) %>%
+  filter(Cave == "Cave 2") %>%
+  group_by(genus) %>%
+  mutate(counts.g = sum(counts)) %>%
+  select(-counts) %>%
+  distinct(genus,.keep_all = TRUE) %>%
+  mutate(keep = ifelse(counts.g == 0,"no","yes")) %>%
+  filter(keep == "yes") %>%
+  select(-keep)
+
+genus %>%
+  write.table("culturable_genus.txt", sep = "\t")
+```
+
+## pie charts
+
+```{r}
+rock.p <- phylum[1:3,c(1,6,7)]
+pie(rock.p$RA.t,labels = paste(round(rock.p$RA.t,3)*100,"%",sep = " "),col = c("#FF5A5F","#FFB400","#007A87"),radius = 0.8,clockwise = TRUE,border = "white")
+
+soil.p <- phylum[6:8,c(1,6,7)]
+pie(soil.p$RA.t,labels = paste(round(soil.p$RA.t,3)*100,"%",sep = " "),col = c("#FF5A5F","#FFB400","#007A87"),radius = 0.8,clockwise = TRUE,border = "white")
+
+water.p <- phylum[11:13,c(1,6,7)]
+pie(water.p$RA.t,labels = paste(round(water.p$RA.t,3)*100,"%",sep = " "),col = c("#FF5A5F","#FFB400","#007A87"),radius = 0.8,clockwise = TRUE,border = "white")
+
+cave1.p <- phylum[1:3,c(1,4,5)]
+pie(cave1.p$RA.c,labels = paste(round(cave1.p$RA.c,3)*100,"%",sep = " "),col = c("#FF5A5F","#FFB400","#007A87"),radius = 0.8,clockwise = TRUE,border = "white")
+
+cave2.p <- phylum[16:18,c(1,4,5)]
+pie(cave2.p$RA.c,labels = paste(round(cave2.p$RA.c,3)*100,"%",sep = " "),col = c("#FF5A5F","#FFB400","#007A87"),radius = 0.8,clockwise = TRUE,border = "white")
+```
+
+
+```{r}
+rock <- all %>%
+  filter(Type == "Rock") %>%
+  select(taxa,SampleID,counts) %>%
+  group_by(SampleID,taxa) %>%
+  mutate(keep = ifelse(sum(counts) == 0,"no","yes")) %>%
+  filter(keep == "yes") %>%
+  select(-keep)
+
+soil <- all %>%
+  filter(Type == "Soil") %>%
+  select(taxa,SampleID,counts) %>%
+  group_by(SampleID,taxa) %>%
+  mutate(keep = ifelse(sum(counts) == 0,"no","yes")) %>%
+  filter(keep == "yes") %>%
+  select(-keep)
+
+water <- all %>%
+  filter(Type == "Water") %>%
+  select(taxa,SampleID,counts) %>%
+  group_by(SampleID,taxa) %>%
+  mutate(keep = ifelse(sum(counts) == 0,"no","yes")) %>%
+  filter(keep == "yes") %>%
+  select(-keep)
+```
+
+## alpha diversity
+
+```{r}
+alpha.div <- read.table("alpha_div.txt",header = T,row.names = 1,sep = "\t") %>%
+  rownames_to_column("SampleID")
+
+alpha.div$Type <- factor(alpha.div$Type,levels = c("Soil","Rock","Water"))
+
+type.alpha <- ggplot(alpha.div, aes(x=Type, y=Shannon.indices, color=Type)) + theme_bw() + stat_boxplot(geom = "errorbar",width=0.2,aes(color=Type)) + geom_boxplot(alpha=1, outlier.size=0, size=0.7, width=0.5, fill="transparent") + labs(x="Sample type", y="Shannon indices") + theme(axis.text.x = element_text(angle = 45,vjust = 1,hjust = 1),axis.title.x = element_blank()) + scale_color_brewer(palette = "Dark2") + theme(legend.position = "none")
+type.alpha
+
+ggsave("type.alpha.pdf",type.alpha,height = 4,width = 4)
+
+shapiro.test(alpha.div$Shannon.indices)  #p-value = 0.3436
+bartlett.test(Shannon.indices ~ Type,alpha.div)  #p-value = 0.1371
+
+type.aov <- aov(Shannon.indices ~ Type,alpha.div)
+summary(type.aov)
+#            Df Sum Sq  Mean Sq  F value  Pr(>F)   
+#Type         2  7.613   3.807   6.509   0.00364 **
+#Residuals   39 22.808   0.585                   
+
+TukeyHSD(type.aov)
+#                  diff        lwr        upr     p adj
+#Soil-Rock   0.9329692  0.1493400  1.7165984 0.0164094 *
+#Water-Rock -0.0989834 -0.7695546  0.5715878 0.9313194
+#Water-Soil -1.0319526 -1.7598004 -0.3041048 0.0037626 **
+```
+
+## venn diagram
+
+```{r}
+library(VennDiagram)
+
+cave.venn <- venn.diagram(list(cave1 = cave1$taxa,cave2 = cave2$taxa),filename = NULL,fill = c("#e41a1c","#377eb8"),alpha = 0.7,lty = 0)
+grid.draw(cave.venn)
+
+cave.comm <- as.data.frame(intersect(x = cave1$taxa,y = cave2$taxa))
+
+cave1.comm.RA <- cave1 %>%
+  select(taxa,counts) %>%
+  mutate(comm = ifelse(taxa %in% cave.comm$`intersect(x = cave1$taxa, y = cave2$taxa)`,"yes","no")) %>%
+  group_by(comm) %>%
+  mutate(counts = sum(counts)) %>%
+  mutate(RA = counts/1408*100) %>%
+  select(-taxa) %>%
+  distinct(common,.keep_all = T)
+
+cave2.comm.RA <- cave2 %>%
+  select(taxa,counts) %>%
+  mutate(comm = ifelse(taxa %in% cave.comm$`intersect(x = cave1$taxa, y = cave2$taxa)`,"yes","no")) %>%
+  group_by(comm) %>%
+  mutate(counts = sum(counts)) %>%
+  mutate(RA = counts/2154*100) %>%
+  select(-taxa) %>%
+  distinct(common,.keep_all = T)
+
+cave.comm.RA$sp <- c(164,93,151,93)
+
+x <- rep(c(2,1,4.5,3.5), each = 2)
+y <- rep(c('RA.yes','RA.no','sp.yes','sp.no'),times = 2)
+z <- c(71.02273,28.97727,36.18677,63.81323,76.50882,23.49118,38.11475,61.88525)
+df <- data.frame(x = x, y = y, z = z)
+
+cave.comm.p <- df %>%
+  ggplot(aes(x = x, y = z, fill = y)) + geom_bar(stat = "identity",position = "stack") + theme_light() +  theme(panel.grid = element_blank(),legend.title = element_blank(),axis.title = element_blank(),legend.position = "bottom") + scale_x_continuous(breaks = c(1,2,3.5,4.5),labels = c("Cave 1.NS","Cave 1.RA","Cave 2.NS","Cave 2.RA")) + scale_fill_manual(values = c("lightblue3","plum3","honeydew3","salmon2"))
+ggsave("cave.comm.pdf",cave.comm.p,height = 4,width = 4)
+
+type.venn <- venn.diagram(list(rock = rock$taxa,soil = soil$taxa,water = water$taxa),filename = NULL,fill = c("#d95f02","#1b9e77","#7570b3"),alpha = 0.7,lty = 0,rotation.degree = 180)
+grid.draw(type.venn)
+
+type.rs <- as.data.frame(intersect(x = rock$taxa,y = soil$taxa))
+type.rw <- as.data.frame(intersect(x = rock$taxa,y = water$taxa))
+type.sw <- as.data.frame(intersect(x = soil$taxa,y = water$taxa))
+type.comm <- as.data.frame(intersect(x = intersect(x = rock$taxa,y = soil$taxa),y = water$taxa))
+
+soil.comm.RA <- soil %>%
+  select(taxa,counts) %>%
+  mutate(rs = ifelse(taxa %in% type.rs$`intersect(x = rock$taxa, y = soil$taxa)`,"yes","no"), sw = ifelse(taxa %in% type.sw$`intersect(x = soil$taxa, y = water$taxa)`,"yes","no"),comm = ifelse(taxa %in% type.comm$`intersect(x = intersect(x = rock$taxa, y = soil$taxa), y = water$taxa)`,"yes","no"),only = ifelse(taxa %in% union(x = type.rs$`intersect(x = rock$taxa, y = soil$taxa)`,y = type.sw$`intersect(x = soil$taxa, y = water$taxa)`),"no","yes")) %>%
+  group_by(comm) %>%
+  mutate(RA.comm = sum(counts)/sum(soil$counts)*100)  %>%
+  ungroup() %>%
+  group_by(rs) %>%
+  mutate(RA.rs = sum(counts)/sum(soil$counts)*100) %>%
+  ungroup() %>%
+  group_by(sw) %>%
+  mutate(RA.sw = sum(counts)/sum(soil$counts)*100) %>%
+  ungroup() %>%
+  group_by(only) %>%
+  mutate(RA.only = sum(counts)/sum(soil$counts)*100) %>%
+  ungroup() %>%
+  select(-SampleID,-taxa,-counts) %>%
+  distinct(comm,rs,sw,only,.keep_all = T)
+
+rock.comm.RA <- rock %>%
+  select(taxa,counts) %>%
+  mutate(rs = ifelse(taxa %in% type.rs$`intersect(x = rock$taxa, y = soil$taxa)`,"yes","no"), rw = ifelse(taxa %in% type.rw$`intersect(x = rock$taxa, y = water$taxa)`,"yes","no"),comm = ifelse(taxa %in% type.comm$`intersect(x = intersect(x = rock$taxa, y = soil$taxa), y = water$taxa)`,"yes","no"),only = ifelse(taxa %in% union(x = type.rs$`intersect(x = rock$taxa, y = soil$taxa)`,y = type.rw$`intersect(x = rock$taxa, y = water$taxa)`),"no","yes")) %>%
+  group_by(comm) %>%
+  mutate(RA.comm = sum(counts)/sum(rock$counts)*100)  %>%
+  ungroup() %>%
+  group_by(rs) %>%
+  mutate(RA.rs = sum(counts)/sum(rock$counts)*100) %>%
+  ungroup() %>%
+  group_by(rw) %>%
+  mutate(RA.rw = sum(counts)/sum(rock$counts)*100) %>%
+  ungroup() %>%
+  group_by(only) %>%
+  mutate(RA.only = sum(counts)/sum(rock$counts)*100) %>%
+  ungroup() %>%
+  select(-SampleID,-taxa,-counts) %>%
+  distinct(comm,rs,rw,only,.keep_all = T)
+
+water.comm.RA <- water %>%
+  select(taxa,counts) %>%
+  mutate(sw = ifelse(taxa %in% type.sw$`intersect(x = soil$taxa, y = water$taxa)`,"yes","no"), rw = ifelse(taxa %in% type.rw$`intersect(x = rock$taxa, y = water$taxa)`,"yes","no"),comm = ifelse(taxa %in% type.comm$`intersect(x = intersect(x = rock$taxa, y = soil$taxa), y = water$taxa)`,"yes","no"),only = ifelse(taxa %in% union(x = type.rw$`intersect(x = rock$taxa, y = water$taxa)`,y = type.sw$`intersect(x = soil$taxa, y = water$taxa)`),"no","yes")) %>%
+  group_by(comm) %>%
+  mutate(RA.comm = sum(counts)/sum(water$counts)*100)  %>%
+  ungroup() %>%
+  group_by(sw) %>%
+  mutate(RA.sw = sum(counts)/sum(water$counts)*100) %>%
+  ungroup() %>%
+  group_by(rw) %>%
+  mutate(RA.rw = sum(counts)/sum(water$counts)*100) %>%
+  ungroup() %>%
+  group_by(only) %>%
+  mutate(RA.only = sum(counts)/sum(water$counts)*100) %>%
+  ungroup() %>%
+  select(-SampleID,-taxa,-counts) %>%
+  distinct(comm,rs,rw,only,.keep_all = T)
+```
+
+## beta diversity
+
+```{r}
+all.wide <- all %>%
+  select(SampleID,Cave,Type,counts,taxa) %>%
+    spread(taxa,counts,fill = 0)
+
+pcoa1 <- function(x){
+  require(vegan)
+  pc <- capscale(log2(x[,4:ncol(x)]+1)~1)
+  pc.axes <- bind_cols(x[1:3],as_tibble(scores(pc,choices = c(1:3))$sites))
+  pc.eig <- eigenvals(pc)/sum(eigenvals(pc))
+  pc.res <- list(axes = pc.axes,eig = pc.eig)
+  return(pc.res)
+}
+
+cave.pc <- pcoa1(all.wide)
+head(cave.pc)
+#      MDS1       MDS2       MDS3 
+# 0.13452369 0.07619369 0.07359489
+
+cave.perm <- adonis(all.wide[,4:ncol(all.wide)]~all.wide$Cave)
+cave.perm
+#              Df SumsOfSqs MeanSqs  F.Model  R2     Pr(>F)
+#all.wide$Cave  1    0.4648 0.46478  1.0191 0.02484  0.421
+#Residuals     40   18.2426 0.45606         0.97516       
+#Total         41   18.7074                 1.00000       
+
+type.perm <- adonis(all.wide[,4:ncol(all.wide)]~all.wide$Type)
+type.perm
+#              Df SumsOfSqs MeanSqs  F.Model  R2     Pr(>F)    
+#all.wide$Type  2    2.5352 1.26758  3.0568 0.13552  0.001 ***
+#Residuals     39   16.1722 0.41467         0.86448           
+#Total         41   18.7074                 1.00000           
+
+library(pairwiseAdonis)
+
+type.2perm.c <- pairwise.adonis(all.wide[,4:ncol(all.wide)],all.wide$Type)
+type.2perm.c
+#     pairs     total.DF  F.Model     R2       p.value p.adjusted sig
+#  Rock vs Soil       22 2.391049 0.10222067   0.001      0.003   *
+# Rock vs Water       31 3.029649 0.09172513   0.001      0.003   *
+# Soil vs Water       28 3.560883 0.11651768   0.001      0.003   *
+
+cave.pc$axes$Type <- factor(cave.pc$axes$Type,levels = c("Soil","Rock","Water"))
+
+type.pcoa.c <- cave.pc$axes%>%
+  ggplot(aes(MDS1,MDS2,color = Type)) + geom_point(size = 3) + theme_bw() +  theme(panel.grid = element_blank(),legend.position = "bottom",legend.title = element_blank()) + scale_colour_brewer(palette = "Dark2") + stat_ellipse(level = 0.95,linetype = 5) + labs(x = "PCo1 (13.45%)",y = "PCo2 (7.62%)")
+type.pcoa.c
+
+ggsave("type.pcoa.pdf",type.pcoa.c,height = 4,width = 4)
+```
